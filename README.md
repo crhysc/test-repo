@@ -9,9 +9,6 @@ from pymatgen.core import Structure
 def parse_arguments():
     """
     Parses command-line arguments.
-
-    Returns:
-        argparse.Namespace: Parsed arguments.
     """
     parser = argparse.ArgumentParser(
         description="Generate POSCAR files and an id_prop.csv file from JSON files containing 2D structures."
@@ -47,7 +44,7 @@ def load_json(file_path):
         file_path (str): Path to the JSON file.
 
     Returns:
-        dict: Parsed JSON data.
+        dict: Parsed JSON data or None if an error occurs.
     """
     try:
         with open(file_path, 'r') as f:
@@ -61,9 +58,6 @@ def load_json(file_path):
 def create_output_directory(directory):
     """
     Creates the output directory if it does not exist.
-
-    Args:
-        directory (str): Path to the output directory.
     """
     if not os.path.exists(directory):
         try:
@@ -78,10 +72,6 @@ def create_output_directory(directory):
 def generate_poscar(structure, filename):
     """
     Generates a POSCAR file from a pymatgen Structure object.
-
-    Args:
-        structure (Structure): pymatgen Structure object.
-        filename (str): Path to save the POSCAR file.
     """
     try:
         structure.to(fmt="poscar", filename=filename)
@@ -92,17 +82,10 @@ def generate_poscar(structure, filename):
 def sanitize_filename(name):
     """
     Sanitizes the filename by removing or replacing invalid characters.
-
-    Args:
-        name (str): Original filename.
-
-    Returns:
-        str: Sanitized filename.
     """
     return "".join(c if c.isalnum() or c in ('_', '-') else '_' for c in name)
 
 def main():
-    # Parse command-line arguments
     args = parse_arguments()
     input_dir = args.input
     output_dir = args.output
@@ -121,10 +104,9 @@ def main():
         sys.exit(1)
 
     writer = csv.writer(csvfile)
-
     skipped = 0
 
-    # Iterate over input directory
+    # Find and sort all JSON files in the input directory
     pattern = os.path.join(input_dir, "*.json")
     json_files = sorted(glob.glob(pattern))
 
@@ -135,11 +117,9 @@ def main():
 
     for file_index, file_path in enumerate(json_files):
         print(f"\nProcessing file {file_index}: '{file_path}'")
-
-        # Load JSON data
         data = load_json(file_path)
         if data is None:
-            continue  # Skip this file if loading failed
+            continue
 
         base_filename = os.path.basename(file_path)
         sanitized_base_filename = sanitize_filename(os.path.splitext(base_filename)[0])
@@ -160,7 +140,7 @@ def main():
                     print(f"No 'steps' found in entry {entry_index} under key '{top_key}'. Skipping.")
                     continue
 
-                # Use only the last step
+                # Select only the last step
                 last_step = steps[-1]
                 structure_dict = last_step.get('structure')
                 energy = last_step.get('energy', None)
@@ -170,7 +150,7 @@ def main():
                     skipped += 1
                     continue
 
-                # Reconstruct the Structure object
+                # Reconstruct the Structure object from the last step
                 try:
                     structure = Structure.from_dict(structure_dict)
                 except Exception as e:
@@ -178,20 +158,18 @@ def main():
                     skipped += 1
                     continue
 
-                # Generate POSCAR filename (only one per entry since we're using the last step)
+                # Create a single POSCAR file for this entry (from its last step)
                 poscar_filename = f"{filename_prefix}{sanitized_base_filename}_{sanitized_top_key}_entry{entry_index}_laststep.vasp"
                 poscar_path = os.path.join(output_dir, poscar_filename)
 
-                # Generate the POSCAR file
                 generate_poscar(structure, poscar_path)
 
-                # Write to id_prop.csv
+                # Write a single line to id_prop.csv for this entry
                 try:
                     writer.writerow([poscar_filename, energy])
                 except Exception as e:
                     print(f"Error writing to id_prop.csv for {poscar_filename}: {e}")
                     skipped += 1
-                    continue
 
     csvfile.close()
     print("\nAll POSCAR files have been generated and id_prop.csv has been created.")
