@@ -8,7 +8,7 @@ from pymatgen.core import Structure
 
 def parse_arguments():
     parser = argparse.ArgumentParser(
-        description="Generate POSCAR files and an id_prop.csv file from JSON files containing 2D structures."
+        description="Generate up to 1000 POSCAR files and an id_prop.csv file from JSON files containing 2D structures."
     )
     parser.add_argument(
         "-i",
@@ -85,6 +85,8 @@ def main():
 
     writer = csv.writer(csvfile)
     skipped = 0
+    poscar_count = 0
+    max_poscars = 1000
 
     # Iterate over input directory
     pattern = os.path.join(input_dir, "*.json")
@@ -95,7 +97,11 @@ def main():
         csvfile.close()
         sys.exit(1)
 
+    # Process each JSON file until we have created 1000 POSCAR files
     for file_index, file_path in enumerate(json_files):
+        if poscar_count >= max_poscars:
+            break
+
         print(f"\nProcessing file {file_index}: '{file_path}'")
 
         # Load JSON data
@@ -108,6 +114,9 @@ def main():
 
         # Iterate over the top-level keys in the JSON data
         for top_key in data:
+            if poscar_count >= max_poscars:
+                break
+
             print(f"Processing top-level key: '{top_key}'")
             entries = data[top_key]
             if not entries:
@@ -117,6 +126,9 @@ def main():
             sanitized_top_key = sanitize_filename(top_key) or "key_empty"
 
             for entry_index, entry in enumerate(entries):
+                if poscar_count >= max_poscars:
+                    break
+
                 steps = entry.get('steps', [])
                 if not steps:
                     print(f"No 'steps' found in entry {entry_index} under key '{top_key}'. Skipping.")
@@ -156,8 +168,13 @@ def main():
                     skipped += 1
                     continue
 
+                poscar_count += 1
+                if poscar_count >= max_poscars:
+                    print(f"Reached {max_poscars} POSCAR files. Halting.")
+                    break
+
     csvfile.close()
-    print("\nAll POSCAR files have been generated and id_prop.csv has been created.")
+    print("\nAll POSCAR files have been generated and id_prop.csv has been created (up to 1000 files).")
     print(f"Number of entries skipped: {skipped}")
 
 if __name__ == "__main__":
