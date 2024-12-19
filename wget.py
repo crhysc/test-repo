@@ -1,181 +1,131 @@
 import json
+import transformers
+import torch
 import os
-import argparse
-import glob
 import sys
-import csv
-from pymatgen.core import Structure
+from jarvis.io.vasp.inputs import Poscar
+from pydantic_settings import BaseSettings
+from typing import Optional
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(
-        description="Generate up to 1000 POSCAR files and an id_prop.csv file from JSON files containing 2D structures."
-    )
-    parser.add_argument(
-        "-i",
-        "--input",
-        type=str,
-        required=True,
-        help="Path to the directory containing the input JSON files."
-    )
-    parser.add_argument(
-        "-o",
-        "--output",
-        type=str,
-        default="POSCAR_files",
-        help="Directory to save the generated POSCAR files and the id_prop.csv file. Defaults to 'POSCAR_files'."
-    )
-    parser.add_argument(
-        "-f",
-        "--filename_prefix",
-        type=str,
-        default="POSCAR_",
-        help="Prefix for the POSCAR filenames. Defaults to 'POSCAR_'."
-    )
-    return parser.parse_args()
-
-def load_json(file_path):
-    try:
-        with open(file_path, 'r') as f:
-            data = json.load(f)
-        print(f"Successfully loaded JSON data from '{file_path}'.")
-        return data
-    except Exception as e:
-        print(f"Error loading JSON file '{file_path}': {e}")
-        return None
-
-def create_output_directory(directory):
-    if not os.path.exists(directory):
-        try:
-            os.makedirs(directory)
-            print(f"Created output directory '{directory}'.")
-        except Exception as e:
-            print(f"Error creating directory '{directory}': {e}")
-            sys.exit(1)
-    else:
-        print(f"Output directory '{directory}' already exists.")
-
-def generate_poscar(structure, filename):
-    try:
-        structure.to(fmt="poscar", filename=filename)
-        print(f"POSCAR file written to '{filename}'.")
-    except Exception as e:
-        print(f"Error writing POSCAR file '{filename}': {e}")
-
-def sanitize_filename(name):
-    return "".join(c if c.isalnum() or c in ('_', '-') else '_' for c in name)
+class TrainingPropConfig(BaseSettings):
+    """Training config defaults and validation."""
+    id_prop_path: Optional[str] = "robo_desc.json.zip"
+    prefix: str = "atomgpt_run"
+    model_name: str = "gpt2"
+    batch_size: int = 16
+    max_length: int = 512
+    num_epochs: int = 500
+    latent_dim: int = 1024
+    learning_rate: float = 1e-3
+    test_each_run: bool = True
+    include_struct: bool = False
+    pretrained_path: str = ""
+    seed_val: int = 42
+    n_train: Optional[int] = None
+    n_val: Optional[int] = None
+    n_test: Optional[int] = None
+    output_dir: str = "out_temp"
+    train_ratio: Optional[float] = None
+    val_ratio: float = 0.1
+    test_ratio: float = 0.1
+    keep_data_order: bool = True
+    desc_type: str = "desc_2"
+    convert: bool = False
 
 def main():
     # Parse command-line arguments
-    args = parse_arguments()
-    input_dir = args.input
-    output_dir = args.output
-    filename_prefix = args.filename_prefix
-
-    # Create output directory
-    create_output_directory(output_dir)
-
-    # Prepare to write id_prop.csv
-    id_prop_path = os.path.join(output_dir, "id_prop.csv")
-
-    try:
-        csvfile = open(id_prop_path, 'w', newline='')
-    except Exception as e:
-        print(f"Error opening id_prop.csv for writing: {e}")
+    if len(sys.argv) != 3:
+        print("Usage: python forward_prediction_script.py <config.json> <POSCAR>")
         sys.exit(1)
+    
+    config_file_path = sys.argv[1]
+    poscar_file_path = sys.argv[2]
 
-    writer = csv.writer(csvfile)
-    skipped = 0
-    poscar_count = 0
-    max_poscars = 1000
+    # Load the configuration file
+    with open(config_file_path, "r") as f:
+        config_data = json.load(f)
 
-    # Iterate over input directory
-    pattern = os.path.join(input_dir, "*.json")
-    json_files = sorted(glob.glob(pattern))
+    config = TrainingPropConfig(**config_data)
+    print("Loaded configuration:")
+    print(config)
 
-    if not json_files:
-        print(f"No JSON files found in directory '{input_dir}'.")
-        csvfile.close()
-        sys.exit(1)
+    # Prepare device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Process each JSON file until we have created 1000 POSCAR files
-    for file_index, file_path in enumerate(json_files):
-        if poscar_count >= max_poscars:
-            break
+    # Load the model
+    model_name = config.model_name
+    output_dir = config.output_dir
 
-        print(f"\nProcessing file {file_index}: '{file_path}'")
+    if "t5" in model_name:
+        model = transformers.T5ForConditionalGeneration.from_pretrained(model_name)
+    else:
+        model = transformers.AutoModelForCausalLM.from_pretrained(
+            model_name,
+            low_cpu_mem_usage=True,
+        )
 
-        # Load JSON data
-        data = load_json(file_path)
-        if data is None:
-            continue  # Skip this file if loading failed
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+        model.resize_token_embeddings(len(tokenizer))
 
-        base_filename = os.path.basename(file_path)
-        sanitized_base_filename = sanitize_filename(os.path.splitext(base_filename)[0])
+    model.lm_head = torch.nn.Sequential(
+        torch.nn.Linear(model.config.hidden_size, config.latent_dim),
+        torch.nn.Linear(config.latent_dim, 1),
+    )
 
-        # Iterate over the top-level keys in the JSON data
-        for top_key in data:
-            if poscar_count >= max_poscars:
-                break
+    # Load model weights
+    state_dict = torch.load(os.path.join(output_dir, "best_model.pt"), map_location=device)
+    # Remove 'module.' prefix if present
+    new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    model.load_state_dict(new_state_dict)
 
-            print(f"Processing top-level key: '{top_key}'")
-            entries = data[top_key]
-            if not entries:
-                print(f"No entries found under key '{top_key}'. Skipping.")
-                continue
+    # Load input POSCAR
+    atoms = Poscar.from_file(poscar_file_path).atoms
+    print("Inputted Atoms:")
+    print(atoms)
 
-            sanitized_top_key = sanitize_filename(top_key) or "key_empty"
+    # Generate descriptor
+    desc = atoms.describe()[config.desc_type]
 
-            for entry_index, entry in enumerate(entries):
-                if poscar_count >= max_poscars:
-                    break
+    # Encode input POSCAR string
+    with open(poscar_file_path, "r") as f:
+        pos_str = f.read()
 
-                steps = entry.get('steps', [])
-                if not steps:
-                    print(f"No 'steps' found in entry {entry_index} under key '{top_key}'. Skipping.")
-                    continue
+    max_length = config.max_length
+    input_ids = tokenizer(
+        [pos_str],
+        return_tensors="pt",
+        max_length=max_length,
+        padding="max_length",
+        truncation=True,
+    )["input_ids"]
 
-                # Only process the last step
-                step_index = len(steps) - 1
-                step = steps[step_index]
-                structure_dict = step.get('structure')
-                energy = step.get('energy', None)
+    input_ids = input_ids.to(device)
+    model = model.to(device)
 
-                if not structure_dict or energy is None:
-                    print(f"Missing 'structure' or 'energy' in the last step of entry {entry_index} under key '{top_key}'. Skipping.")
-                    skipped += 1
-                    continue
+    # Make prediction
+    if "t5" in model_name:
+        predictions = (
+            model(
+                input_ids,
+                decoder_input_ids=input_ids,
+            )
+            .logits.squeeze()
+            .mean(dim=-1)
+        )
+    else:
+        predictions = (
+            model(
+                input_ids,
+            )
+            .logits.squeeze()
+            .mean(dim=-1)
+        )
 
-                # Reconstruct the Structure object
-                try:
-                    structure = Structure.from_dict(structure_dict)
-                except Exception as e:
-                    print(f"Error reconstructing Structure for the last step of entry {entry_index} under key '{top_key}': {e}")
-                    skipped += 1
-                    continue
-
-                # Generate POSCAR filename (only for the last step)
-                poscar_filename = f"{filename_prefix}{sanitized_base_filename}_{sanitized_top_key}_entry{entry_index}_step{step_index}.vasp"
-                poscar_path = os.path.join(output_dir, poscar_filename)
-
-                # Generate the POSCAR file
-                generate_poscar(structure, poscar_path)
-
-                # Write to id_prop.csv
-                try:
-                    writer.writerow([poscar_filename, energy])
-                except Exception as e:
-                    print(f"Error writing to id_prop.csv for {poscar_filename}: {e}")
-                    skipped += 1
-                    continue
-
-                poscar_count += 1
-                if poscar_count >= max_poscars:
-                    print(f"Reached {max_poscars} POSCAR files. Halting.")
-                    break
-
-    csvfile.close()
-    print("\nAll POSCAR files have been generated and id_prop.csv has been created (up to 1000 files).")
-    print(f"Number of entries skipped: {skipped}")
+    predictions = predictions.cpu().detach().numpy().tolist()
+    print("Predicted bandgap:")
+    print(predictions)
 
 if __name__ == "__main__":
     main()
