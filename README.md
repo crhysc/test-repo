@@ -229,17 +229,15 @@ def gen_atoms(prompt="", max_new_tokens=512, model=None, tokenizer=None):
 
 
 def run_atomgpt_inverse(config_file="config.json"):
-    run_path = os.path.abspath(config_file).split("config.json")[0]
+    # Removed the line that sets run_path based on config_file
     config = loadjson(config_file)
     config = TrainingPropConfig(**config)
     pprint.pprint(config)
 
-    id_prop_path = config.id_prop_path
-    num_train = config.num_train
-    num_test = config.num_test
+    # Convert id_prop_path to an absolute path, and derive csv_dir from it
+    id_prop_csv = os.path.abspath(config.id_prop_path)
+    csv_dir = os.path.dirname(id_prop_csv)
 
-    # Construct the path to the CSV
-    id_prop_csv = os.path.join(run_path, id_prop_path)
     print(f"[DEBUG] Loading CSV from: {id_prop_csv}")
     with open(id_prop_csv, "r") as f:
         reader = csv.reader(f)
@@ -253,12 +251,15 @@ def run_atomgpt_inverse(config_file="config.json"):
         info["id"] = row[0]
         ids.append(row[0])
         info["prop"] = float(row[1])
-        # Construct path to POSCAR
-        poscar_path = os.path.join(run_path, info["id"])
+        # Construct path to POSCAR from the CSV directory
+        poscar_path = os.path.join(csv_dir, info["id"])
         print(f"[DEBUG] Loading POSCAR from: {poscar_path}")
         atoms = Atoms.from_poscar(poscar_path)
         info["atoms"] = atoms.to_dict()
         dat.append(info)
+
+    num_train = config.num_train
+    num_test = config.num_test
 
     # Split train/test
     train_ids = ids[0:num_train]
@@ -339,7 +340,7 @@ def run_atomgpt_inverse(config_file="config.json"):
             lr_scheduler_type="linear",
             seed=3407,
             output_dir="outputs",
-            num_train_epochs=config.num_epochs,  # or 5 as in your example
+            num_train_epochs=config.num_epochs,
             report_to="none",
         ),
     )
@@ -382,8 +383,6 @@ def run_atomgpt_inverse(config_file="config.json"):
         print("[DEBUG] target_mat:", target_mat)
         print("[DEBUG] genmat:", gen_mat)
 
-        # If you really want to write them to CSV as POSCAR:
-        # But check if target_mat or gen_mat is None
         if target_mat is not None and gen_mat is not None:
             line = (
                 i["id"]
